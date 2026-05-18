@@ -1,2 +1,12 @@
 **/__pycache__/
 *.swp
+
+# Local checkpoints and generated baseline outputs.
+*.pt
+*.pth
+*.ckpt
+**/weights/*
+**/src/weights/*
+outputs/
+output_*/
+runs/
