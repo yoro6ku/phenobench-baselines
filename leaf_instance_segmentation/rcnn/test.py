@@ -6,6 +6,7 @@ import torch
 from os.path import join, dirname, abspath
 from torch.utils.data import DataLoader
 from dataloaders.datasets import Leaves, collate_pdc
+from tqdm import tqdm
 import models
 import yaml
 
@@ -50,7 +51,7 @@ def main(config, ckpt_file, out):
 
     with torch.autograd.set_detect_anomaly(True):
         model.network.eval()
-        for idx, item in enumerate(iter(val_loader)):
+        for idx, item in enumerate(tqdm(val_loader, total=len(val_loader), desc="Leaf Mask R-CNN inference", unit="batch")):
             with torch.no_grad():
                 size = item['image'][0].shape[1]
                 semantic, instance, predictions = model.test_step(item)

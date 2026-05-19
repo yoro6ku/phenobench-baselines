@@ -203,6 +203,10 @@ def run(cmd: List[str], cwd: Path, env: Optional[Dict[str, str]] = None, dry_run
     subprocess.run(cmd, cwd=str(cwd), env=env, check=True)
 
 
+def log_step(message: str) -> None:
+    print(f"\n==> {message}", flush=True)
+
+
 def ensure_yaml() -> None:
     if yaml is None:
         raise SystemExit("PyYAML is required for this wrapper. Install it in the Python environment running this script.")
@@ -367,6 +371,8 @@ def normalize_known_outputs(raw_dir: Path, predictions_dir: Path) -> None:
                     continue
                 shutil.copytree(source, dest)
                 copied = True
+                count = sum(1 for path in dest.rglob("*") if path.is_file())
+                print(f"Normalized {name}: {count} file(s) -> {dest}", flush=True)
                 break
             if copied:
                 break
@@ -379,6 +385,7 @@ def run_yolov7(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: 
     if args.image and len(images) != 1:
         raise SystemExit("YOLOv7 wrapper currently supports either all images or one --image for smoke tests.")
     source = images[0] if args.image else args.phenobench_dir / args.split / "images"
+    log_step(f"YOLOv7 inference on {len(images)} image(s)")
     env = os.environ.copy()
     env.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
     env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
@@ -410,6 +417,7 @@ def run_yolov7(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: 
     run(cmd, cwd=workdir, env=env, dry_run=args.dry_run)
     predictions_dir = output_dir / "predictions"
     if not args.dry_run:
+        log_step("Normalizing YOLO label predictions")
         normalize_yolo_labels(
             output_dir / raw_name / "labels",
             predictions_dir / spec["prediction_subdir"],
@@ -423,6 +431,7 @@ def run_semantic(spec: Dict, args: argparse.Namespace, output_dir: Path, weights
     workdir = rel(spec["workdir"])
     raw_dir = output_dir / "raw"
     image_names = image_names_for_split(args.phenobench_dir, args.split, args.image)
+    log_step(f"Semantic inference on {len(image_names)} image(s)")
     with semantic_dataset_view(args.phenobench_dir, args.split, image_names) as dataset_root:
         config = temp_config_for_semantic(workdir / spec["config"], dataset_root)
         runner = REPO_ROOT / "scripts" / "run_semantic_test_compat.py"
@@ -440,6 +449,7 @@ def run_semantic(spec: Dict, args: argparse.Namespace, output_dir: Path, weights
         run(cmd, cwd=workdir, dry_run=args.dry_run)
     predictions_dir = output_dir / "predictions"
     if not args.dry_run:
+        log_step("Normalizing semantic predictions")
         normalize_known_outputs(raw_dir, predictions_dir)
     return predictions_dir
 
@@ -448,6 +458,7 @@ def run_rcnn(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Pa
     workdir = rel(spec["workdir"])
     raw_dir = output_dir / "raw"
     image_names = image_names_for_split(args.phenobench_dir, args.split, args.image)
+    log_step(f"R-CNN inference on {len(image_names)} image(s)")
     env = os.environ.copy()
     env.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
     env["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
@@ -466,6 +477,7 @@ def run_rcnn(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Pa
         run(cmd, cwd=workdir, env=env, dry_run=args.dry_run)
     predictions_dir = output_dir / "predictions"
     if not args.dry_run:
+        log_step("Normalizing R-CNN predictions")
         normalize_known_outputs(raw_dir, predictions_dir)
     return predictions_dir
 
@@ -492,10 +504,12 @@ def run_docker_make(spec: Dict, args: argparse.Namespace, output_dir: Path, weig
         raise SystemExit(f"{args.model} has no Makefile target for split={args.split}.")
     if not args.dry_run:
         prepare_docker_weights(spec, output_dir, weights)
+    log_step(f"Docker/Make inference for {args.model} on split={args.split}")
     cmd = ["make", f"data_dir={args.phenobench_dir}", f"log_dir={output_dir}", target]
     run(cmd, cwd=rel(spec["workdir"]), dry_run=args.dry_run)
     predictions_dir = output_dir / "predictions"
     if not args.dry_run:
+        log_step("Normalizing Docker predictions")
         normalize_known_outputs(output_dir, predictions_dir)
     return predictions_dir
 
@@ -522,6 +536,7 @@ def visualize(spec: Dict, args: argparse.Namespace, prediction_dir: Path, output
     if args.no_visualize:
         return None
     visualization_dir = output_dir / "visualizations"
+    log_step(f"Rendering visualizations to {visualization_dir}")
     cmd = [
         str(args.python),
         str(REPO_ROOT / "scripts" / "visualize_predictions.py"),
@@ -571,6 +586,11 @@ def archive_results(
 ) -> None:
     run_date = date.today().isoformat()
     model_root = daily_root / args.model
+    if args.daily_subdir:
+        subdir = Path(args.daily_subdir)
+        if subdir.is_absolute() or ".." in subdir.parts:
+            raise SystemExit("--daily-subdir must be a relative path without '..'")
+        model_root = model_root / subdir
     image_names = archive_image_names(args, visualization_dir)
     image_stems = {Path(name).stem for name in image_names}
     copied = 0
@@ -669,6 +689,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-visualize", action="store_true")
     parser.add_argument("--no-daily-output", action="store_true", help="Do not copy results into output_YYYY-MM-DD.")
     parser.add_argument("--daily-output-root", type=Path, help="Override the daily archive directory. Defaults to output_YYYY-MM-DD.")
+    parser.add_argument("--daily-subdir", help="Optional subfolder under output_YYYY-MM-DD/<model> for archive copies.")
     parser.add_argument("--open-vscode", action="store_true", help="Open the visualization PNG/folder in VS Code after rendering.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -690,6 +711,7 @@ def main() -> int:
     spec = MODELS[args.model]
     output_dir = args.output_root / args.model / args.split
     output_dir.mkdir(parents=True, exist_ok=True)
+    log_step(f"Model={args.model} task={spec['task']} split={args.split} output={output_dir}")
 
     if "note" in spec and spec.get("kind") != "unsupported":
         print(f"Note: {spec['note']}", flush=True)
@@ -700,13 +722,16 @@ def main() -> int:
         weights = ensure_weight(spec, weights, args.download_weights, args.dry_run)
 
     if args.skip_infer:
+        log_step("Skipping inference and reusing existing raw predictions")
         prediction_dir = output_dir / "predictions"
         if not args.dry_run:
             if spec["kind"] in {"semantic_lightning", "rcnn"}:
                 raw_dir = output_dir / "raw"
                 if raw_dir.exists():
+                    log_step("Normalizing existing raw predictions")
                     normalize_known_outputs(raw_dir, prediction_dir)
             elif spec["kind"] == "docker_make":
+                log_step("Normalizing existing Docker predictions")
                 normalize_known_outputs(output_dir, prediction_dir)
     elif spec["kind"] == "yolov7":
         prediction_dir = run_yolov7(spec, args, output_dir, weights)

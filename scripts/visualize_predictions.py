@@ -16,9 +16,12 @@ The drawing itself delegates to phenobench.visualization.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, Iterator, List, Optional, Sequence, TypeVar
+
+os.environ.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
 
 import matplotlib
 
@@ -30,6 +33,7 @@ from PIL import Image
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEVKIT_ROOT = REPO_ROOT.parent / "phenobench"
+T = TypeVar("T")
 
 
 def add_devkit_to_path(devkit_root: Path) -> None:
@@ -40,6 +44,24 @@ def add_devkit_to_path(devkit_root: Path) -> None:
 
 def png_names(path: Path) -> List[str]:
     return sorted(p.name for p in path.glob("*.png"))
+
+
+def progress(items: Sequence[T], desc: str, unit: str) -> Iterator[T]:
+    try:
+        from tqdm import tqdm
+
+        yield from tqdm(items, total=len(items), desc=desc, unit=unit)
+        return
+    except ImportError:
+        pass
+
+    total = len(items)
+    print(f"{desc}: 0/{total}", flush=True)
+    step = max(1, total // 10) if total else 1
+    for index, item in enumerate(items, start=1):
+        yield item
+        if index == total or index % step == 0:
+            print(f"{desc}: {index}/{total}", flush=True)
 
 
 def image_names(phenobench_dir: Path, split: str, requested: Sequence[str], limit: Optional[int]) -> List[str]:
@@ -256,7 +278,7 @@ def main() -> int:
         raise SystemExit("No images selected for visualization.")
 
     rendered = 0
-    for name in names:
+    for name in progress(names, "Rendering visualizations", "image"):
         image = Image.open(args.phenobench_dir / args.split / "images" / name).convert("RGB")
         if render_prediction_panel(args.task, image, name, args.prediction_dir, args.output_dir, args.alpha):
             rendered += 1
