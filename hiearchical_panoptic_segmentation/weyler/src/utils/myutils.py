@@ -62,7 +62,7 @@ def get_contours(mask: np.ndarray) -> List:
   Returns:
       List: contours (see openCV doc)
   """
-  mask = mask.squeeze().astype(np.uint8)
+  mask = (mask.squeeze() > 0).astype(np.uint8) * 255
   if cv2.__version__ == '3.4.2':
     _, cnts, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                   cv2.CHAIN_APPROX_NONE)
@@ -748,7 +748,7 @@ class Cluster():
     Returns:
         np.ndarray: part map
     """
-    part_map = np.zeros((self.height, self.width), dtype=np.uint8)
+    part_map = np.zeros((self.height, self.width), dtype=np.uint16)
   
     n_objs = len(results["objects"][cls_idx])
     part_counter = 0
@@ -756,7 +756,7 @@ class Cluster():
       obj_part_ids = results["objects"][cls_idx][i]['obj_part_indicies']
       for obj_part_id in obj_part_ids:
         part_counter += 1
-        part_mask = results["parts"][cls_idx][obj_part_id]['part_mask'].astype(np.uint8)
+        part_mask = results["parts"][cls_idx][obj_part_id]['part_mask'].astype(np.uint16)
         part_map += (part_mask * part_counter)
 
     return part_map
@@ -1104,11 +1104,11 @@ class Visualizer():
     
     for cls_idx in results["objects"].keys():
       for obj in results["objects"][cls_idx]:
-        objects_canvas = np.zeros((self.im_height, self.im_width), dtype=np.uint8)
+        objects_canvas = np.zeros((self.im_height, self.im_width), dtype=np.uint16)
 
         # loop over all parts which belong to current object
         for idx, part_idx in enumerate(obj["obj_part_indicies"]):
-          objects_canvas += (results["parts"][cls_idx][part_idx]["part_mask"].astype(np.uint8) * (idx + 1))
+          objects_canvas += (results["parts"][cls_idx][part_idx]["part_mask"].astype(np.uint16) * (idx + 1))
         
         # mask
         cnts = get_contours(objects_canvas)

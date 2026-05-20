@@ -6,7 +6,7 @@ FROM pytorch/pytorch:${PYTORCH}-cuda${CUDA}-cudnn${CUDNN}-devel
 
 ##############################################
 # You should modify this to match your GPU compute capability
-ENV TORCH_CUDA_ARCH_LIST="6.0 6.1 7.0 7.5+PTX"
+ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6+PTX"
 ##############################################
 
 # ENV TORCH_NVCC_FLAGS="-Xfatbin -compress-all"

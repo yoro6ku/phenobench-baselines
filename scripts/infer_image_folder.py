@@ -86,10 +86,26 @@ def assert_prepared_root_is_empty(root: Path, split: str) -> None:
         )
 
 
-def prepare_dataset(image_dir: Path, root: Path, split: str, limit: int | None) -> int:
+def parse_resize(value: str | None) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if "x" in value.lower():
+        width_text, height_text = value.lower().split("x", 1)
+        width = int(width_text)
+        height = int(height_text)
+    else:
+        width = height = int(value)
+    if width < 1 or height < 1:
+        raise ValueError
+    return width, height
+
+
+def prepare_dataset(image_dir: Path, root: Path, split: str, limit: int | None, resize: tuple[int, int] | None) -> int:
     images = image_files(image_dir, limit)
     if not images:
         raise SystemExit(f"No supported images found in: {image_dir}")
+    if resize is not None:
+        print(f"Resizing prepared images to {resize[0]}x{resize[1]}", flush=True)
 
     split_root = root / split
     for field in ["images", "semantics", "plant_instances", "leaf_instances"]:
@@ -100,6 +116,8 @@ def prepare_dataset(image_dir: Path, root: Path, split: str, limit: int | None) 
     for source in progress(images, "Preparing images", "image"):
         with Image.open(source) as image:
             rgb = image.convert("RGB")
+            if resize is not None:
+                rgb = rgb.resize(resize, Image.Resampling.BILINEAR)
             width, height = rgb.size
             if width != height:
                 non_square += 1
@@ -128,13 +146,13 @@ def prepared_dataset_root(args: argparse.Namespace) -> Iterable[Path]:
     if args.prepared_root is not None:
         root = args.prepared_root.resolve()
         assert_prepared_root_is_empty(root, args.split)
-        prepare_dataset(args.image_dir, root, args.split, args.limit)
+        prepare_dataset(args.image_dir, root, args.split, args.limit, args.resize)
         yield root
         return
 
     with tempfile.TemporaryDirectory(prefix="phenobench_folder_") as temp_dir:
         root = Path(temp_dir)
-        prepare_dataset(args.image_dir, root, args.split, args.limit)
+        prepare_dataset(args.image_dir, root, args.split, args.limit, args.resize)
         yield root
 
 
@@ -156,6 +174,7 @@ def parse_args() -> tuple[argparse.Namespace, List[str]]:
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--viz-limit", type=int, default=100000)
     parser.add_argument("--limit", type=int, help="Only prepare/infer the first N images.")
+    parser.add_argument("--resize", help="Resize prepared images first, for example 1024 or 1024x1024. Defaults to 1024 for hierarchical_weyler.")
     parser.add_argument("--download-weights", action="store_true")
     parser.add_argument("--open-vscode", action="store_true")
     parser.add_argument("--no-visualize", action="store_true")
@@ -174,6 +193,13 @@ def parse_args() -> tuple[argparse.Namespace, List[str]]:
         args.output_root = default_output_root(args.image_dir)
     else:
         args.output_root = args.output_root.expanduser().resolve()
+    if args.resize is None and args.model == "hierarchical_weyler":
+        args.resize = (1024, 1024)
+    else:
+        try:
+            args.resize = parse_resize(args.resize)
+        except (TypeError, ValueError):
+            parser.error("--resize must be SIZE or WIDTHxHEIGHT, with positive integers")
     return args, passthrough
 
 

@@ -31,10 +31,11 @@ if args['save']:
 device = torch.device("cuda:0" if args['cuda'] else "cpu")
 
 # train dataloader
-train_dataset = get_dataset(
-    args['train_dataset']['name'], args['train_dataset']['kwargs'])
-train_dataset_it = torch.utils.data.DataLoader(
-    train_dataset, batch_size=args['train_dataset']['batch_size'], shuffle=True, drop_last=True, num_workers=args['train_dataset']['workers'], pin_memory=True if args['cuda'] else False)
+if not args["only_eval"]:
+  train_dataset = get_dataset(
+      args['train_dataset']['name'], args['train_dataset']['kwargs'])
+  train_dataset_it = torch.utils.data.DataLoader(
+      train_dataset, batch_size=args['train_dataset']['batch_size'], shuffle=True, drop_last=True, num_workers=args['train_dataset']['workers'], pin_memory=True if args['cuda'] else False)
 
 # val dataloader
 val_dataset = get_dataset(
@@ -65,7 +66,10 @@ resume = False
 if args['resume_path'] is not None and os.path.exists(args['resume_path']):
   with open(args['resume_path'], 'rb') as f:
     buffer = io.BytesIO(f.read())
-  state = torch.load(buffer, map_location=device)
+  try:
+    state = torch.load(buffer, map_location=device, weights_only=False)
+  except TypeError:
+    state = torch.load(buffer, map_location=device)
   start_epoch = state['epoch'] + 1
   model.load_state_dict(state['model_state_dict'])
   optim_state_dict = state['optim_state_dict']
@@ -202,7 +206,7 @@ def val(epoch, device, only_eval=False):
           os.makedirs(path_to_dir)
 
         for j in range(batch_size):
-          im_filename, _ = os.path.basename(sample['im_name'][j]).split(".")
+          im_filename, _ = os.path.splitext(os.path.basename(sample['im_name'][j]))
           im_name = img_names[j]
           im_id = os.path.basename(im_name)
 

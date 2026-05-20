@@ -1,20 +1,28 @@
 """ Configuration file.
 """
 import copy
+import os
+
+DATASET_DIR = os.environ.get('DATASET_DIR', '</path/to/dataset>')
+LOG_DIR = os.environ.get('WEYLER_LOG_DIR', '<path/to/log/directoy>')
+
+def env_int(name, default):
+  value = os.environ.get(name)
+  return default if value is None else int(value)
 
 args = dict(
-  train_img_dir='</path/to/dataset>/train/images',
+  train_img_dir=os.path.join(DATASET_DIR, 'train', 'images'),
   
-  val_img_dir='</path/to/dataset>/val/images',
+  val_img_dir=os.path.join(DATASET_DIR, 'val', 'images'),
 
-  test_img_dir='</path/to/dataset>/test/images',
+  test_img_dir=os.path.join(DATASET_DIR, 'test', 'images'),
 
-  report_dir = '<path/to/log/directoy>/reports',
+  report_dir = os.path.join(LOG_DIR, 'reports'),
 
-  type='test',
+  type=os.environ.get('WEYLER_SPLIT', 'test'),
   
-  width = 1024,
-  height = 1024,
+  width = env_int('WEYLER_WIDTH', 1024),
+  height = env_int('WEYLER_HEIGHT', 1024),
 
   n_classes = 1,
   n_sigma = 3,

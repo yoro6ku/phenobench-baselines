@@ -2,7 +2,6 @@
 """
 import os
 
-import h5py
 import numpy as np
 import skimage.exposure
 import skimage.io
@@ -10,6 +9,11 @@ import skimage.io
 import report_config
 from utils.myutils import (Cluster, Visualizer, bounding_box_from_mask,
                            get_all_predictions)
+
+try:
+  import h5py
+except ImportError:
+  h5py = None
 
 args = report_config.get_args()
 
@@ -20,15 +24,15 @@ path_test_reports = os.path.join(args["report_dir"], 'test')
 try:
   train_preds = get_all_predictions(path_train_reports)
 except FileNotFoundError:
-  pass
+  train_preds = []
 try:
   val_preds = get_all_predictions(path_val_reports)
 except FileNotFoundError:
-  pass
+  val_preds = []
 try:
   test_preds = get_all_predictions(path_test_reports)
 except FileNotFoundError:
-  pass
+  test_preds = []
 
 cluster = Cluster('np',
                   args['width'],
@@ -49,10 +53,13 @@ vis.set_status(args['type'])
 epoch = ''
 if args['type'] == 'train':
   preds = train_preds
+  export_report_root = path_train_reports
 elif args['type'] == 'val':
   preds = val_preds
+  export_report_root = path_val_reports
 elif args['type'] == 'test':
   preds = test_preds
+  export_report_root = path_test_reports
 else:
   raise ValueError
 
@@ -67,31 +74,31 @@ for val_pred in preds:
   if current_epoch != epoch:
     epoch = current_epoch
 
-    if 'hdf5_ground_truth' in locals():
+    if 'hdf5_ground_truth' in locals() and hdf5_ground_truth is not None:
       hdf5_ground_truth.close()
-    if 'hdf5_predictions' in locals():
+    if 'hdf5_predictions' in locals() and hdf5_predictions is not None:
       hdf5_predictions.close()    
 
     # create export directories for current epoch
-    export_dir_gt = os.path.join(path_val_reports, epoch, 'patches', 'ground_truth')
+    export_dir_gt = os.path.join(export_report_root, epoch, 'patches', 'ground_truth')
     if not os.path.exists(export_dir_gt):
       os.makedirs(export_dir_gt)
     
-    export_dir_pred = os.path.join(path_val_reports, epoch, 'patches', 'pred')
+    export_dir_pred = os.path.join(export_report_root, epoch, 'patches', 'pred')
     if not os.path.exists(export_dir_pred):
       os.makedirs(export_dir_pred)
 
-    export_dir_obj_instances = os.path.join(path_val_reports, epoch, 'instances', 'objects')
+    export_dir_obj_instances = os.path.join(export_report_root, epoch, 'instances', 'objects')
     if not os.path.exists(export_dir_obj_instances):
       os.makedirs(export_dir_obj_instances)
 
-    export_dir_part_instances = os.path.join(path_val_reports, epoch, 'instances', 'parts')
+    export_dir_part_instances = os.path.join(export_report_root, epoch, 'instances', 'parts')
     if not os.path.exists(export_dir_part_instances):
       os.makedirs(export_dir_part_instances)
 
     # create hdf5 files to store ground truth and predictions patches
-    hdf5_ground_truth = h5py.File(os.path.join(export_dir_gt, 'ground_truth.h5'), 'w')
-    hdf5_predictions = h5py.File(os.path.join(export_dir_pred, 'predictions.h5'), 'w')
+    hdf5_ground_truth = h5py.File(os.path.join(export_dir_gt, 'ground_truth.h5'), 'w') if h5py is not None else None
+    hdf5_predictions = h5py.File(os.path.join(export_dir_pred, 'predictions.h5'), 'w') if h5py is not None else None
 
   pred = val_pred.load()
   objects_seed, parts_seed, objects_offsets, parts_offsets, objects_sigma, parts_sigma, results = cluster.cluster(pred)
@@ -104,7 +111,7 @@ for val_pred in preds:
   part_map = cluster.draw_part_map(results, cls_idx='0')
 
   # save part instance maps to disk
-  part_instances_map = np.zeros((args['height'], args['width']), dtype=np.uint8)
+  part_instances_map = np.zeros((args['height'], args['width']), dtype=np.uint16)
   for part_id, part_results in enumerate(results['parts']['0']):
     part_mask = part_results['part_mask']
     part_instances_map[part_mask] = part_id + 1
@@ -112,7 +119,7 @@ for val_pred in preds:
   skimage.io.imsave(os.path.join(export_dir_part_instances, img_name + ".png"), part_instances_map, check_contrast=False)
   
   # save object instance maps to disk
-  object_instances_map = np.zeros((args['height'], args['width']), dtype=np.uint8)
+  object_instances_map = np.zeros((args['height'], args['width']), dtype=np.uint16)
   for obj_id, obj_results in enumerate(results['objects']['0']):
     part_ids = obj_results['obj_part_indicies']
     for part_id in part_ids:

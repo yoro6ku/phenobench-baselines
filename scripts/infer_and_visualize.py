@@ -14,6 +14,9 @@ import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
 
+import numpy as np
+from PIL import Image
+
 try:
     import yaml
 except ImportError:  # pragma: no cover - handled at runtime
@@ -167,12 +170,15 @@ MODELS: Dict[str, Dict] = {
     },
     "hierarchical_weyler": {
         "task": "hierarchical",
-        "kind": "manual_config",
+        "kind": "weyler",
         "workdir": "hiearchical_panoptic_segmentation/weyler",
         "weights": "hiearchical_panoptic_segmentation/weyler/weights/weyler_checkpoint_0381.pth",
         "url": "https://www.ipb.uni-bonn.de/html/projects/phenobench/hierarchical/weyler/weyler_checkpoint_0381.pth",
         "deps": "hiearchical_panoptic_segmentation/weyler/requirements.txt",
-        "note": "This baseline hard-codes inference paths in train_config.py and report_config.py.",
+        "note": (
+            "Weyler predicts crop plant and leaf instances. Semantics are derived "
+            "from predicted plant instances as crop-vs-background for normalized output."
+        ),
     },
     "hierarchical_hapt": {
         "task": "hierarchical",
@@ -235,14 +241,18 @@ def symlink_or_copy(source: Path, dest: Path) -> None:
         shutil.copy2(source, dest)
 
 
-def populate_split_view(source_split: Path, dest_split: Path, image_names: List[str]) -> None:
+def populate_split_view(source_split: Path, dest_split: Path, image_names: List[str], copy_files: bool = False) -> None:
     for source_field in sorted(path for path in source_split.iterdir() if path.is_dir()):
         dest_field = dest_split / source_field.name
         dest_field.mkdir(parents=True, exist_ok=True)
         for image_name in image_names:
             source = source_field / image_name
             if source.exists():
-                symlink_or_copy(source, dest_field / image_name)
+                dest = dest_field / image_name
+                if copy_files:
+                    shutil.copy2(source, dest)
+                else:
+                    symlink_or_copy(source, dest)
 
 
 @contextmanager
@@ -257,10 +267,10 @@ def semantic_dataset_view(phenobench_dir: Path, split: str, image_names: List[st
 
 
 @contextmanager
-def rcnn_split_view(phenobench_dir: Path, split: str, image_names: List[str]):
+def rcnn_split_view(phenobench_dir: Path, split: str, image_names: List[str], copy_files: bool = False):
     with tempfile.TemporaryDirectory(prefix="phenobench_rcnn_") as temp_dir:
         split_dir = Path(temp_dir) / split
-        populate_split_view(phenobench_dir / split, split_dir, image_names)
+        populate_split_view(phenobench_dir / split, split_dir, image_names, copy_files=copy_files)
         yield Path(temp_dir)
 
 
@@ -324,6 +334,31 @@ def selected_images(phenobench_dir: Path, split: str, requested: List[str]) -> L
     return [image_dir / name for name in names]
 
 
+def common_image_size(image_paths: List[Path]) -> tuple[int, int]:
+    sizes = []
+    for image_path in image_paths:
+        with Image.open(image_path) as image:
+            sizes.append(image.size)
+    unique_sizes = sorted(set(sizes))
+    if len(unique_sizes) != 1:
+        details = ", ".join(f"{width}x{height}" for width, height in unique_sizes[:5])
+        raise SystemExit(
+            "Weyler hierarchical inference expects all selected images to have the same size. "
+            f"Found: {details}"
+        )
+    return unique_sizes[0]
+
+
+def ensure_weyler_size(width: int, height: int) -> None:
+    if width % 8 == 0 and height % 8 == 0:
+        return
+    raise SystemExit(
+        "Weyler hierarchical inference needs image dimensions divisible by 8. "
+        f"Found {width}x{height}. For plain image folders, use "
+        "`scripts/infer_image_folder.py /path/to/images --model hierarchical_weyler --resize 512`."
+    )
+
+
 def normalize_yolo_labels(raw_labels: Path, out_dir: Path, image_paths: List[Path], label_offset: int) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     for image_path in image_paths:
@@ -350,12 +385,26 @@ def normalize_known_outputs(raw_dir: Path, predictions_dir: Path) -> None:
         "semantics": [
             "semantics",
             "predictions/semantics",
+            "mask2former_plants/*_predictions/semantics",
+            "mask2former_leaves/*_predictions/semantics",
+            "panoptic_deeplab_plants/*_predictions/semantics",
             "postprocess/arg_max_class",
             "arg_max_class",
             "lightning_logs/version_*/postprocess/arg_max_class",
         ],
-        "plant_instances": ["plant_instances", "predictions/plant_instances", "instances"],
-        "leaf_instances": ["leaf_instances", "predictions/leaf_instances", "instances"],
+        "plant_instances": [
+            "plant_instances",
+            "predictions/plant_instances",
+            "mask2former_plants/*_predictions/instances",
+            "panoptic_deeplab_plants/*_predictions/plant_instances",
+            "instances",
+        ],
+        "leaf_instances": [
+            "leaf_instances",
+            "predictions/leaf_instances",
+            "mask2former_leaves/*_predictions/instances",
+            "instances",
+        ],
         "plant_bboxes": ["plant_bboxes", "predictions/plant_bboxes", "labels"],
         "leaf_bboxes": ["leaf_bboxes", "predictions/leaf_bboxes", "labels"],
     }
@@ -482,13 +531,80 @@ def run_rcnn(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Pa
     return predictions_dir
 
 
+def normalize_weyler_outputs(raw_dir: Path, predictions_dir: Path, split: str) -> None:
+    report_instances = raw_dir / "reports" / split / "-001" / "instances"
+    plant_source = report_instances / "objects"
+    leaf_source = report_instances / "parts"
+    if not plant_source.exists() or not leaf_source.exists():
+        raise SystemExit(
+            "Weyler report output was not found. Expected:\n"
+            f"  {plant_source}\n"
+            f"  {leaf_source}"
+        )
+
+    for name, source in {"plant_instances": plant_source, "leaf_instances": leaf_source}.items():
+        dest = predictions_dir / name
+        if dest.exists():
+            shutil.rmtree(dest)
+        shutil.copytree(source, dest)
+        count = sum(1 for path in dest.glob("*.png"))
+        print(f"Normalized {name}: {count} file(s) -> {dest}", flush=True)
+
+    semantics_dir = predictions_dir / "semantics"
+    if semantics_dir.exists():
+        shutil.rmtree(semantics_dir)
+    semantics_dir.mkdir(parents=True, exist_ok=True)
+    for plant_path in sorted((predictions_dir / "plant_instances").glob("*.png")):
+        plant_instances = np.array(Image.open(plant_path))
+        semantics = (plant_instances > 0).astype(np.uint8)
+        Image.fromarray(semantics).save(semantics_dir / plant_path.name)
+    print(f"Normalized semantics: {len(list(semantics_dir.glob('*.png')))} file(s) -> {semantics_dir}", flush=True)
+
+
+def run_weyler(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> Path:
+    workdir = rel(spec["workdir"])
+    raw_dir = output_dir / "raw"
+    image_names = image_names_for_split(args.phenobench_dir, args.split, args.image)
+    image_paths = [args.phenobench_dir / args.split / "images" / name for name in image_names]
+    width, height = common_image_size(image_paths)
+    ensure_weyler_size(width, height)
+    log_step(f"Weyler hierarchical inference on {len(image_names)} image(s)")
+
+    env = os.environ.copy()
+    env.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    env["DATASET_DIR"] = ""
+    env["WEYLER_SPLIT"] = args.split
+    env["WEYLER_LOG_DIR"] = str(raw_dir)
+    env["WEYLER_SAVE_DIR"] = str(output_dir / "checkpoints")
+    env["WEYLER_RESUME_PATH"] = str(weights)
+    env["WEYLER_ONLY_EVAL"] = "1"
+    env["WEYLER_CUDA"] = "0" if args.device == "cpu" else "1"
+    env["WEYLER_WORKERS"] = "0"
+    env["WEYLER_BATCH_SIZE"] = "1"
+    env["WEYLER_WIDTH"] = str(width)
+    env["WEYLER_HEIGHT"] = str(height)
+
+    with rcnn_split_view(args.phenobench_dir, args.split, image_names) as dataset_root:
+        env["DATASET_DIR"] = str(dataset_root)
+        run([str(args.python), "src/train.py"], cwd=workdir, env=env, dry_run=args.dry_run)
+        run([str(args.python), "src/report.py"], cwd=workdir, env=env, dry_run=args.dry_run)
+
+    predictions_dir = output_dir / "predictions"
+    if not args.dry_run:
+        log_step("Normalizing Weyler predictions")
+        normalize_weyler_outputs(raw_dir, predictions_dir, args.split)
+    return predictions_dir
+
+
 def prepare_docker_weights(spec: Dict, output_dir: Path, weights: Path) -> None:
     dest = output_dir / spec["docker_weight_dest"]
     dest.parent.mkdir(parents=True, exist_ok=True)
-    if dest.exists():
+    if dest.exists() and not dest.is_symlink():
         return
+    if dest.exists() or dest.is_symlink():
+        dest.unlink()
     try:
-        dest.symlink_to(weights)
+        os.link(weights, dest)
     except OSError:
         shutil.copy2(weights, dest)
 
@@ -504,9 +620,15 @@ def run_docker_make(spec: Dict, args: argparse.Namespace, output_dir: Path, weig
         raise SystemExit(f"{args.model} has no Makefile target for split={args.split}.")
     if not args.dry_run:
         prepare_docker_weights(spec, output_dir, weights)
-    log_step(f"Docker/Make inference for {args.model} on split={args.split}")
-    cmd = ["make", f"data_dir={args.phenobench_dir}", f"log_dir={output_dir}", target]
-    run(cmd, cwd=rel(spec["workdir"]), dry_run=args.dry_run)
+    image_names = image_names_for_split(args.phenobench_dir, args.split, args.image)
+    log_step(f"Docker/Make inference for {args.model} on {len(image_names)} image(s)")
+    if args.image:
+        with rcnn_split_view(args.phenobench_dir, args.split, image_names, copy_files=True) as dataset_root:
+            cmd = ["make", f"data_dir={dataset_root}", f"log_dir={output_dir}", target]
+            run(cmd, cwd=rel(spec["workdir"]), dry_run=args.dry_run)
+    else:
+        cmd = ["make", f"data_dir={args.phenobench_dir}", f"log_dir={output_dir}", target]
+        run(cmd, cwd=rel(spec["workdir"]), dry_run=args.dry_run)
     predictions_dir = output_dir / "predictions"
     if not args.dry_run:
         log_step("Normalizing Docker predictions")
@@ -730,6 +852,11 @@ def main() -> int:
                 if raw_dir.exists():
                     log_step("Normalizing existing raw predictions")
                     normalize_known_outputs(raw_dir, prediction_dir)
+            elif spec["kind"] == "weyler":
+                raw_dir = output_dir / "raw"
+                if raw_dir.exists():
+                    log_step("Normalizing existing Weyler predictions")
+                    normalize_weyler_outputs(raw_dir, prediction_dir, args.split)
             elif spec["kind"] == "docker_make":
                 log_step("Normalizing existing Docker predictions")
                 normalize_known_outputs(output_dir, prediction_dir)
@@ -739,6 +866,8 @@ def main() -> int:
         prediction_dir = run_semantic(spec, args, output_dir, weights)
     elif spec["kind"] == "rcnn":
         prediction_dir = run_rcnn(spec, args, output_dir, weights)
+    elif spec["kind"] == "weyler":
+        prediction_dir = run_weyler(spec, args, output_dir, weights)
     elif spec["kind"] == "docker_make":
         prediction_dir = run_docker_make(spec, args, output_dir, weights)
     else:

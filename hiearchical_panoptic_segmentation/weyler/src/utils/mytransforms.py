@@ -1,6 +1,7 @@
 """ Copied from https://github.com/davyneven/SpatialEmbeddings.
 """
 import collections
+import collections.abc
 import random
 
 import numpy as np
@@ -78,7 +79,7 @@ class RandomRotation(T.RandomRotation):
 
         self.keys = keys
 
-        if isinstance(self.resample, collections.Iterable):
+        if isinstance(self.resample, collections.abc.Iterable):
             assert(len(keys) == len(self.resample))
 
     def __call__(self, sample):
@@ -90,7 +91,7 @@ class RandomRotation(T.RandomRotation):
             assert(k in sample)
 
             resample = self.resample
-            if isinstance(resample, collections.Iterable):
+            if isinstance(resample, collections.abc.Iterable):
                 resample = resample[idx]
 
             sample[k] = F.rotate(sample[k], angle, resample,
@@ -106,7 +107,7 @@ class Resize(T.Resize):
 
         self.keys = keys
 
-        if isinstance(self.interpolation, collections.Iterable):
+        if isinstance(self.interpolation, collections.abc.Iterable):
             assert(len(keys) == len(self.interpolation))
 
     def __call__(self, sample):
@@ -116,7 +117,7 @@ class Resize(T.Resize):
             assert(k in sample)
 
             interpolation = self.interpolation
-            if isinstance(interpolation, collections.Iterable):
+            if isinstance(interpolation, collections.abc.Iterable):
                 interpolation = interpolation[idx]
 
             sample[k] = F.resize(sample[k], self.size, interpolation)
@@ -128,7 +129,7 @@ class ToTensor(object):
 
     def __init__(self, keys=[], type="float"):
 
-        if isinstance(type, collections.Iterable):
+        if isinstance(type, collections.abc.Iterable):
             assert(len(keys) == len(type))
 
         self.keys = keys
@@ -142,7 +143,7 @@ class ToTensor(object):
             sample[k] = F.to_tensor(sample[k])
 
             t = self.type
-            if isinstance(t, collections.Iterable):
+            if isinstance(t, collections.abc.Iterable):
                 t = t[idx]
 
             if t == torch.ByteTensor:
