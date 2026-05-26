@@ -6,10 +6,12 @@ from __future__ import annotations
 import argparse
 from contextlib import contextmanager
 from datetime import date
+import json
 import os
 import shutil
 import subprocess
 import tempfile
+import time
 import urllib.request
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -27,6 +29,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEVKIT_ROOT = REPO_ROOT.parent / "phenobench"
 DEFAULT_PYTHON = DEFAULT_DEVKIT_ROOT / ".venv" / "bin" / "python"
 DEFAULT_OUTPUT_ROOT = REPO_ROOT / "outputs"
+DEFAULT_HAPT_ROOT = REPO_ROOT.parent / "HAPT"
 
 
 MODELS: Dict[str, Dict] = {
@@ -182,11 +185,12 @@ MODELS: Dict[str, Dict] = {
     },
     "hierarchical_hapt": {
         "task": "hierarchical",
-        "kind": "external_hapt",
+        "kind": "hapt",
         "workdir": "hiearchical_panoptic_segmentation/HAPT",
+        "weights": "hiearchical_panoptic_segmentation/HAPT/weights/hapt_model.ckpt",
         "url": "https://drive.google.com/drive/folders/1BctpWMAALU0l6pTvo1e6Mxs8PWplNioT?usp=sharing",
         "deps": "hiearchical_panoptic_segmentation/HAPT/README.md",
-        "note": "The HAPT code is not vendored here; this folder only contains the PhenoBench dataset/config adapters.",
+        "note": "Requires the external PRBonn/HAPT code, expected by default at /home/hhadhri/Bureau/code/HAPT.",
     },
 }
 
@@ -202,11 +206,13 @@ def display_path(path: Path, cwd: Path) -> str:
         return str(path)
 
 
-def run(cmd: List[str], cwd: Path, env: Optional[Dict[str, str]] = None, dry_run: bool = False) -> None:
+def run(cmd: List[str], cwd: Path, env: Optional[Dict[str, str]] = None, dry_run: bool = False) -> float:
     print("+ " + " ".join(cmd), flush=True)
     if dry_run:
-        return
+        return 0.0
+    start = time.perf_counter()
     subprocess.run(cmd, cwd=str(cwd), env=env, check=True)
+    return time.perf_counter() - start
 
 
 def log_step(message: str) -> None:
@@ -295,14 +301,18 @@ def ensure_weight(spec: Dict, weights: Path, download: bool, dry_run: bool) -> P
     return weights
 
 
-def temp_config_for_semantic(config_path: Path, phenobench_dir: Path) -> Path:
+def n_gpus_for_device(device: str) -> int:
+    return 0 if device.strip().lower() in {"cpu", "-1", "none"} else 1
+
+
+def temp_config_for_semantic(config_path: Path, phenobench_dir: Path, n_gpus: int) -> Path:
     ensure_yaml()
     with config_path.open() as stream:
         cfg = yaml.safe_load(stream)
     cfg["data"]["name"] = "PDC"
     cfg["data"]["path_to_dataset"] = str(phenobench_dir)
     cfg["data"]["num_workers"] = 0
-    cfg["test"]["n_gpus"] = 0
+    cfg["test"]["n_gpus"] = n_gpus
     cfg["test"]["batch_size"] = 1
     temp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     yaml.safe_dump(cfg, temp)
@@ -310,7 +320,7 @@ def temp_config_for_semantic(config_path: Path, phenobench_dir: Path) -> Path:
     return Path(temp.name)
 
 
-def temp_config_for_rcnn(config_path: Path, phenobench_dir: Path, split: str, output_dir: Path, model_id: str) -> Path:
+def temp_config_for_rcnn(config_path: Path, phenobench_dir: Path, split: str, output_dir: Path, model_id: str, n_gpus: int) -> Path:
     ensure_yaml()
     with config_path.open() as stream:
         cfg = yaml.safe_load(stream)
@@ -321,7 +331,7 @@ def temp_config_for_rcnn(config_path: Path, phenobench_dir: Path, split: str, ou
     cfg["data"]["val"] = str(phenobench_dir / split)
     cfg["train"]["workers"] = 0
     cfg["train"]["batch_size"] = 1
-    cfg["train"]["n_gpus"] = 0
+    cfg["train"]["n_gpus"] = n_gpus
     temp = tempfile.NamedTemporaryFile("w", suffix=".yaml", delete=False)
     yaml.safe_dump(cfg, temp)
     temp.close()
@@ -427,7 +437,7 @@ def normalize_known_outputs(raw_dir: Path, predictions_dir: Path) -> None:
                 break
 
 
-def run_yolov7(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> Path:
+def run_yolov7(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> tuple[Path, float]:
     workdir = rel(spec["workdir"])
     raw_name = "raw"
     images = selected_images(args.phenobench_dir, args.split, args.image)
@@ -463,7 +473,7 @@ def run_yolov7(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: 
         "--exist-ok",
         "--no-trace",
     ]
-    run(cmd, cwd=workdir, env=env, dry_run=args.dry_run)
+    inference_seconds = run(cmd, cwd=workdir, env=env, dry_run=args.dry_run)
     predictions_dir = output_dir / "predictions"
     if not args.dry_run:
         log_step("Normalizing YOLO label predictions")
@@ -473,16 +483,16 @@ def run_yolov7(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: 
             images,
             int(spec.get("label_offset", 0)),
         )
-    return predictions_dir
+    return predictions_dir, inference_seconds
 
 
-def run_semantic(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> Path:
+def run_semantic(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> tuple[Path, float]:
     workdir = rel(spec["workdir"])
     raw_dir = output_dir / "raw"
     image_names = image_names_for_split(args.phenobench_dir, args.split, args.image)
     log_step(f"Semantic inference on {len(image_names)} image(s)")
     with semantic_dataset_view(args.phenobench_dir, args.split, image_names) as dataset_root:
-        config = temp_config_for_semantic(workdir / spec["config"], dataset_root)
+        config = temp_config_for_semantic(workdir / spec["config"], dataset_root, n_gpus_for_device(args.device))
         runner = REPO_ROOT / "scripts" / "run_semantic_test_compat.py"
         cmd = [
             str(args.python),
@@ -495,15 +505,15 @@ def run_semantic(spec: Dict, args: argparse.Namespace, output_dir: Path, weights
             "--export_dir",
             str(raw_dir),
         ]
-        run(cmd, cwd=workdir, dry_run=args.dry_run)
+        inference_seconds = run(cmd, cwd=workdir, dry_run=args.dry_run)
     predictions_dir = output_dir / "predictions"
     if not args.dry_run:
         log_step("Normalizing semantic predictions")
         normalize_known_outputs(raw_dir, predictions_dir)
-    return predictions_dir
+    return predictions_dir, inference_seconds
 
 
-def run_rcnn(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> Path:
+def run_rcnn(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> tuple[Path, float]:
     workdir = rel(spec["workdir"])
     raw_dir = output_dir / "raw"
     image_names = image_names_for_split(args.phenobench_dir, args.split, args.image)
@@ -520,15 +530,16 @@ def run_rcnn(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Pa
             args.split,
             output_dir,
             spec["model_id"],
+            n_gpus_for_device(args.device),
         )
         runner = REPO_ROOT / "scripts" / "run_rcnn_test_cpu.py"
         cmd = [str(args.python), str(runner), spec["script"], "-c", str(config), "-w", str(weights), "-o", str(raw_dir)]
-        run(cmd, cwd=workdir, env=env, dry_run=args.dry_run)
+        inference_seconds = run(cmd, cwd=workdir, env=env, dry_run=args.dry_run)
     predictions_dir = output_dir / "predictions"
     if not args.dry_run:
         log_step("Normalizing R-CNN predictions")
         normalize_known_outputs(raw_dir, predictions_dir)
-    return predictions_dir
+    return predictions_dir, inference_seconds
 
 
 def normalize_weyler_outputs(raw_dir: Path, predictions_dir: Path, split: str) -> None:
@@ -561,7 +572,7 @@ def normalize_weyler_outputs(raw_dir: Path, predictions_dir: Path, split: str) -
     print(f"Normalized semantics: {len(list(semantics_dir.glob('*.png')))} file(s) -> {semantics_dir}", flush=True)
 
 
-def run_weyler(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> Path:
+def run_weyler(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> tuple[Path, float]:
     workdir = rel(spec["workdir"])
     raw_dir = output_dir / "raw"
     image_names = image_names_for_split(args.phenobench_dir, args.split, args.image)
@@ -586,14 +597,49 @@ def run_weyler(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: 
 
     with rcnn_split_view(args.phenobench_dir, args.split, image_names) as dataset_root:
         env["DATASET_DIR"] = str(dataset_root)
-        run([str(args.python), "src/train.py"], cwd=workdir, env=env, dry_run=args.dry_run)
-        run([str(args.python), "src/report.py"], cwd=workdir, env=env, dry_run=args.dry_run)
+        inference_seconds = run([str(args.python), "src/train.py"], cwd=workdir, env=env, dry_run=args.dry_run)
+        inference_seconds += run([str(args.python), "src/report.py"], cwd=workdir, env=env, dry_run=args.dry_run)
 
     predictions_dir = output_dir / "predictions"
     if not args.dry_run:
         log_step("Normalizing Weyler predictions")
         normalize_weyler_outputs(raw_dir, predictions_dir, args.split)
-    return predictions_dir
+    return predictions_dir, inference_seconds
+
+
+def run_hapt(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> tuple[Path, float]:
+    image_names = image_names_for_split(args.phenobench_dir, args.split, args.image)
+    predictions_dir = output_dir / "predictions"
+    log_step(f"HAPT hierarchical inference on {len(image_names)} image(s)")
+
+    cmd = [
+        str(args.python),
+        str(REPO_ROOT / "scripts" / "run_hapt_inference.py"),
+        "--hapt-root",
+        str(args.hapt_root),
+        "--phenobench-dir",
+        str(args.phenobench_dir),
+        "--split",
+        args.split,
+        "--weights",
+        str(weights),
+        "--output-dir",
+        str(predictions_dir),
+        "--device",
+        args.device,
+        "--input-size",
+        args.hapt_input_size,
+        "--data-source",
+        args.hapt_data_source,
+    ]
+    if args.image:
+        for image_name in image_names:
+            cmd.extend(["--image", image_name])
+    env = os.environ.copy()
+    env.setdefault("MPLCONFIGDIR", "/tmp/matplotlib")
+    env.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
+    inference_seconds = run(cmd, cwd=REPO_ROOT, env=env, dry_run=args.dry_run)
+    return predictions_dir, inference_seconds
 
 
 def prepare_docker_weights(spec: Dict, output_dir: Path, weights: Path) -> None:
@@ -609,7 +655,7 @@ def prepare_docker_weights(spec: Dict, output_dir: Path, weights: Path) -> None:
         shutil.copy2(weights, dest)
 
 
-def run_docker_make(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> Path:
+def run_docker_make(spec: Dict, args: argparse.Namespace, output_dir: Path, weights: Path) -> tuple[Path, float]:
     if shutil.which("docker") is None and not args.dry_run:
         raise SystemExit(
             "Docker is required for this baseline, but `docker` is not on PATH.\n"
@@ -625,15 +671,15 @@ def run_docker_make(spec: Dict, args: argparse.Namespace, output_dir: Path, weig
     if args.image:
         with rcnn_split_view(args.phenobench_dir, args.split, image_names, copy_files=True) as dataset_root:
             cmd = ["make", f"data_dir={dataset_root}", f"log_dir={output_dir}", target]
-            run(cmd, cwd=rel(spec["workdir"]), dry_run=args.dry_run)
+            inference_seconds = run(cmd, cwd=rel(spec["workdir"]), dry_run=args.dry_run)
     else:
         cmd = ["make", f"data_dir={args.phenobench_dir}", f"log_dir={output_dir}", target]
-        run(cmd, cwd=rel(spec["workdir"]), dry_run=args.dry_run)
+        inference_seconds = run(cmd, cwd=rel(spec["workdir"]), dry_run=args.dry_run)
     predictions_dir = output_dir / "predictions"
     if not args.dry_run:
         log_step("Normalizing Docker predictions")
         normalize_known_outputs(output_dir, predictions_dir)
-    return predictions_dir
+    return predictions_dir, inference_seconds
 
 
 def unsupported(spec: Dict, args: argparse.Namespace) -> Path:
@@ -784,6 +830,64 @@ def open_in_vscode(visualization_dir: Optional[Path], image_names: List[str], dr
         print(f"VS Code did not open successfully. Open this path manually: {target}")
 
 
+def timing_payload(
+    args: argparse.Namespace,
+    spec: Dict,
+    output_dir: Path,
+    prediction_dir: Path,
+    inference_seconds: Optional[float],
+) -> Dict:
+    image_count = len(image_names_for_split(args.phenobench_dir, args.split, args.image))
+    seconds_per_image = None
+    fps = None
+    if inference_seconds is not None and inference_seconds > 0 and image_count > 0:
+        seconds_per_image = inference_seconds / image_count
+        fps = image_count / inference_seconds
+    return {
+        "model": args.model,
+        "task": spec["task"],
+        "kind": spec["kind"],
+        "split": args.split,
+        "device": args.device,
+        "images": image_count,
+        "inference_seconds": inference_seconds,
+        "seconds_per_image": seconds_per_image,
+        "fps": fps,
+        "prediction_dir": str(prediction_dir),
+        "output_dir": str(output_dir),
+        "timing_scope": (
+            "model execution only, before wrapper normalization, visualization, "
+            "daily archiving, and PhenoBench evaluation"
+        ),
+    }
+
+
+def write_timing_json(
+    args: argparse.Namespace,
+    spec: Dict,
+    output_dir: Path,
+    prediction_dir: Path,
+    inference_seconds: Optional[float],
+) -> None:
+    if args.timing_json is None:
+        return
+    payload = timing_payload(args, spec, output_dir, prediction_dir, inference_seconds)
+    args.timing_json.parent.mkdir(parents=True, exist_ok=True)
+    with args.timing_json.open("w") as stream:
+        json.dump(payload, stream, indent=2)
+        stream.write("\n")
+    if payload["fps"] is None:
+        print(f"Inference timing: {args.timing_json}")
+    else:
+        print(
+            "Inference timing: "
+            f"{payload['inference_seconds']:.3f}s, "
+            f"{payload['seconds_per_image']:.6f}s/image, "
+            f"{payload['fps']:.3f} FPS -> {args.timing_json}",
+            flush=True,
+        )
+
+
 def list_models() -> None:
     width = max(len(name) for name in MODELS)
     for name, spec in sorted(MODELS.items()):
@@ -801,6 +905,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--download-weights", action="store_true")
     parser.add_argument("--python", type=Path, default=DEFAULT_PYTHON)
     parser.add_argument("--devkit-root", type=Path, default=DEFAULT_DEVKIT_ROOT)
+    parser.add_argument("--hapt-root", type=Path, default=DEFAULT_HAPT_ROOT)
+    parser.add_argument("--hapt-input-size", default="native", help="HAPT inference size as WIDTHxHEIGHT. Use 'native' to keep original image size.")
+    parser.add_argument("--hapt-data-source", default="adapter", choices=["adapter", "image"], help="Use the released HAPT PhenoBench adapter or load images directly.")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--img-size", type=int, default=1024)
     parser.add_argument("--conf-thres", type=float, default=0.0)
@@ -812,6 +919,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-daily-output", action="store_true", help="Do not copy results into output_YYYY-MM-DD.")
     parser.add_argument("--daily-output-root", type=Path, help="Override the daily archive directory. Defaults to output_YYYY-MM-DD.")
     parser.add_argument("--daily-subdir", help="Optional subfolder under output_YYYY-MM-DD/<model> for archive copies.")
+    parser.add_argument("--timing-json", type=Path, help="Write model-only inference timing as JSON.")
     parser.add_argument("--open-vscode", action="store_true", help="Open the visualization PNG/folder in VS Code after rendering.")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
@@ -846,6 +954,7 @@ def main() -> int:
     if args.skip_infer:
         log_step("Skipping inference and reusing existing raw predictions")
         prediction_dir = output_dir / "predictions"
+        inference_seconds = None
         if not args.dry_run:
             if spec["kind"] in {"semantic_lightning", "rcnn"}:
                 raw_dir = output_dir / "raw"
@@ -861,18 +970,21 @@ def main() -> int:
                 log_step("Normalizing existing Docker predictions")
                 normalize_known_outputs(output_dir, prediction_dir)
     elif spec["kind"] == "yolov7":
-        prediction_dir = run_yolov7(spec, args, output_dir, weights)
+        prediction_dir, inference_seconds = run_yolov7(spec, args, output_dir, weights)
     elif spec["kind"] == "semantic_lightning":
-        prediction_dir = run_semantic(spec, args, output_dir, weights)
+        prediction_dir, inference_seconds = run_semantic(spec, args, output_dir, weights)
     elif spec["kind"] == "rcnn":
-        prediction_dir = run_rcnn(spec, args, output_dir, weights)
+        prediction_dir, inference_seconds = run_rcnn(spec, args, output_dir, weights)
     elif spec["kind"] == "weyler":
-        prediction_dir = run_weyler(spec, args, output_dir, weights)
+        prediction_dir, inference_seconds = run_weyler(spec, args, output_dir, weights)
+    elif spec["kind"] == "hapt":
+        prediction_dir, inference_seconds = run_hapt(spec, args, output_dir, weights)
     elif spec["kind"] == "docker_make":
-        prediction_dir = run_docker_make(spec, args, output_dir, weights)
+        prediction_dir, inference_seconds = run_docker_make(spec, args, output_dir, weights)
     else:
         prediction_dir = unsupported(spec, args)
 
+    write_timing_json(args, spec, output_dir, prediction_dir, inference_seconds)
     visualization_dir = visualize(spec, args, prediction_dir, output_dir)
     if not args.no_daily_output:
         daily_root = args.daily_output_root or (REPO_ROOT / f"output_{date.today().isoformat()}")
